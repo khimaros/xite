@@ -1,0 +1,8 @@
+[ ] this is something
+    with a line continuation
+    [ ] and a subtask of that
+        with its own continuation
+[ ] and here is another
+    with a continuation
+[ ] and another
+    with yet another

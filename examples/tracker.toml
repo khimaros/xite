@@ -1,0 +1,33 @@
+[META]
+
+# directories to search for projects containing roadmap files
+#search_dirs = [ "~/Projects/" ]
+search_dirs = [
+	"./autorepos/",
+]
+
+# default search depth when crawling directories
+#search_depth = 1
+
+# override the default roadmap filenames
+#default_roadmap_files = ["ROADMAP.md", "ROADMAP.xit"]
+
+[fnord]
+
+description = 'my favorite project'
+
+tasks = '''
+[ ] some tasks
+    [ ] a child task #fuckup
+[x] and a completed one
+'''
+
+[project1]
+
+# per-project roadmap files (relative to this TOML file)
+roadmap_files = [
+    "./bare.xit"
+]
+
+# repository to look for default roadmap_files
+repo.public = './repos/project1/'

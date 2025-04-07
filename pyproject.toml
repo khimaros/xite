@@ -1,0 +1,7 @@
+[project]
+name = "xite"
+version = "0.1.0"
+description = "a more evolved plain-text format for todos and checklists"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []

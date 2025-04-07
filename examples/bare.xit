@@ -1,0 +1,18 @@
+[ ] new
+[@] active
+[x] complete
+[~] obsolete
+[?] undecided
+[!] blocked
+[>] deferred
+
+[@] active parent item
+    [@] active child item
+        [ ] open second level child
+        [x] completed second level child
+    [ ] open child item
+    [x] completed child item
+
+[ ] item with #project or #category tags
+    [ ] and some children of a task with tags
+    [ ] this one has a #fnord tag
