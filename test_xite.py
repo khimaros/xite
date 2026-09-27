@@ -1,5 +1,6 @@
 import unittest
 import os
+import re
 import tempfile
 import shutil
 import io
@@ -59,6 +60,9 @@ class TestTodoItem(unittest.TestCase):
         self.assertIsNone(item.parent)
         self.assertIsNone(item.source_project)
         self.assertIsNone(item.source_file)
+        self.assertIsNone(item.priority)
+        self.assertIsNone(item.target_date)
+        self.assertEqual(item.space_after_status, " ")
 
     def test_initialization(self):
         child = TodoItem(text="child", status="new", level=1)
@@ -66,6 +70,9 @@ class TestTodoItem(unittest.TestCase):
             text="parent",
             status="active",
             level=0,
+            priority=1,
+            target_date="2025-01-01",
+            space_after_status="   ",
             tags=["proj"],
             children=[child],
             source_project="testproj",
@@ -76,6 +83,9 @@ class TestTodoItem(unittest.TestCase):
         self.assertEqual(parent.text, "parent")
         self.assertEqual(parent.status, "active")
         self.assertEqual(parent.level, 0)
+        self.assertEqual(parent.priority, 1)
+        self.assertEqual(parent.target_date, "2025-01-01")
+        self.assertEqual(parent.space_after_status, "   ")
         self.assertEqual(parent.tags, ["proj"])
         self.assertEqual(parent.children, [child])
         self.assertIsNone(parent.parent)
@@ -199,8 +209,9 @@ class TestXiteParsing(unittest.TestCase):
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
             parse_todo_list(content)
+        # line numbers refer to the raw content, which starts with a blank line
         self.assertIn(
-            "warning: line 3: inconsistent indent (6 spaces)", stderr_capture.getvalue()
+            "warning: line 4: inconsistent indent (6 spaces)", stderr_capture.getvalue()
         )
 
     def test_parse_parent_links(self):
@@ -304,6 +315,93 @@ class TestXiteParsing(unittest.TestCase):
         self.assertEqual(subtask.level, 1)
         self.assertEqual(subtask.tags, ["subtag"])  # tag from continuation
 
+    def test_parse_priorities(self):
+        content = """
+[ ] ! high priority
+[ ] !! very high priority
+[ ] . low priority
+[ ] .. very low priority
+[ ] no priority
+[ ] !. mixed is not a priority
+[ ] .! also not a priority
+[ ] !not a priority (no space)
+[ ] ! a ! b priority is 1
+"""
+        items = parse_todo_list(content)
+        self.assertEqual(len(items), 9)
+        self.assertEqual(items[0].priority, 1)
+        self.assertEqual(items[0].text, "high priority")
+        self.assertEqual(items[1].priority, 2)
+        self.assertEqual(items[1].text, "very high priority")
+        self.assertEqual(items[2].priority, -1)
+        self.assertEqual(items[2].text, "low priority")
+        self.assertEqual(items[3].priority, -2)
+        self.assertEqual(items[3].text, "very low priority")
+        self.assertIsNone(items[4].priority)
+        self.assertEqual(items[4].text, "no priority")
+        self.assertIsNone(items[5].priority)
+        self.assertEqual(items[5].text, "!. mixed is not a priority")
+        self.assertIsNone(items[6].priority)
+        self.assertEqual(items[6].text, ".! also not a priority")
+        self.assertIsNone(items[7].priority)
+        self.assertEqual(items[7].text, "!not a priority (no space)")
+        self.assertEqual(items[8].priority, 1)
+        self.assertEqual(items[8].text, "a ! b priority is 1")
+
+    def test_parse_target_dates(self):
+        content = """
+[ ] simple date -> 2025-07-31
+[ ] date with text -> 2025-08-01 do something
+[ ] text with date do something -> 2025-08-15
+[ ] partial date year-month -> 2025-09
+[ ] partial date year -> 2025
+[ ] date inside text (first one wins) -> 2025-10-10 and also -> 2025-11-11
+[ ] no date
+[ ] invalid arrow ->2025-01-01
+[ ] invalid arrow - > 2025-01-01
+"""
+        items = parse_todo_list(content)
+        self.assertEqual(len(items), 9)
+        self.assertEqual(items[0].target_date, "2025-07-31")
+        self.assertEqual(items[0].text, "simple date")
+        self.assertEqual(items[1].target_date, "2025-08-01")
+        self.assertEqual(items[1].text, "date with text do something")
+        self.assertEqual(items[2].target_date, "2025-08-15")
+        self.assertEqual(items[2].text, "text with date do something")
+        self.assertEqual(items[3].target_date, "2025-09")
+        self.assertEqual(items[3].text, "partial date year-month")
+        self.assertEqual(items[4].target_date, "2025")
+        self.assertEqual(items[4].text, "partial date year")
+        self.assertEqual(items[5].target_date, "2025-10-10")
+        self.assertEqual(
+            items[5].text, "date inside text (first one wins) and also -> 2025-11-11"
+        )
+        self.assertIsNone(items[6].target_date)
+        self.assertEqual(items[6].text, "no date")
+        self.assertIsNone(items[7].target_date)
+        self.assertEqual(items[7].text, "invalid arrow ->2025-01-01")
+        self.assertIsNone(items[8].target_date)
+        self.assertEqual(items[8].text, "invalid arrow - > 2025-01-01")
+
+    def test_parse_whitespace_after_status(self):
+        content = """
+[ ] one space
+[ ]  two spaces
+[ ]   three spaces
+[ ]	one tab
+[ ]notask
+"""
+        items = parse_todo_list(content)
+        self.assertEqual(len(items), 4)
+        self.assertEqual(items[0].space_after_status, " ")
+        self.assertEqual(items[0].text, "one space")
+        self.assertEqual(items[1].space_after_status, "  ")
+        self.assertEqual(items[1].text, "two spaces")
+        self.assertEqual(items[2].space_after_status, "   ")
+        self.assertEqual(items[2].text, "three spaces")
+        self.assertEqual(items[3].space_after_status, "\t")
+        self.assertEqual(items[3].text, "one tab")
+
 
 # helper to mimic removed format_todo_list using the internal _format_recursive
 def _test_format_todo_list(items: List[TodoItem]) -> str:
@@ -406,6 +504,80 @@ class TestXiteFormatting(unittest.TestCase):
         formatted_output = _test_format_todo_list(items)
         self.assertEqual(formatted_output, expected_output)
 
+    def test_format_preserves_whitespace_after_status(self):
+        items = [
+            TodoItem(text="one", status="new", level=0, space_after_status=" "),
+            TodoItem(text="two", status="new", level=0, space_after_status="  "),
+            TodoItem(text="tab", status="new", level=0, space_after_status="\t"),
+        ]
+        expected_output = """
+[ ] one
+[ ]  two
+[ ]	tab
+""".strip()
+        formatted_output = _test_format_todo_list(items)
+        self.assertEqual(formatted_output, expected_output)
+
+    def test_format_with_priority_and_date(self):
+        items = [
+            TodoItem(text="high prio", status="new", level=0, priority=2),
+            TodoItem(text="low prio", status="new", level=0, priority=-2),
+            TodoItem(text="with date", status="new", level=0, target_date="2025-12-25"),
+            TodoItem(
+                text="prio and date",
+                status="new",
+                level=0,
+                priority=1,
+                target_date="2025-01-01",
+            ),
+            TodoItem(
+                text="prio and date with child",
+                status="active",
+                level=0,
+                priority=-1,
+                target_date="2025-02-01",
+                children=[
+                    TodoItem(
+                        text="child",
+                        status="new",
+                        level=1,
+                        priority=3,
+                        target_date="2025-03-01",
+                    )
+                ],
+            ),
+        ]
+        expected_output = """
+[ ] !! high prio
+[ ] .. low prio
+[ ] with date -> 2025-12-25
+[ ] ! prio and date -> 2025-01-01
+[@] . prio and date with child -> 2025-02-01
+    [ ] !!! child -> 2025-03-01
+""".strip()
+        formatted_output = _test_format_todo_list(items)
+        self.assertEqual(formatted_output, expected_output)
+
+    def test_format_roundtrip_whitespace_exact(self):
+        """tests that parsing and formatting preserves whitespace exactly for valid todo items."""
+        # content from examples/whitespace.xit
+        content = (
+            "[ ] one space\n"
+            "[ ]  two spaces\n"
+            "[ ]   three spaces\n"
+            "[ ]\tone tab\n"
+            "[ ]not a task"
+        )
+        parsed_items = parse_todo_list(content)
+        formatted_output = _test_format_todo_list(parsed_items)
+
+        # The line "[ ]not a task" is invalid and ignored by the parser.
+        # Expected output contains only valid lines, with exact whitespace.
+        expected_output = (
+            "[ ] one space\n" "[ ]  two spaces\n" "[ ]   three spaces\n" "[ ]\tone tab"
+        )
+        self.assertEqual(formatted_output, expected_output)
+
 
 class TestXiteFiltering(unittest.TestCase):
 
@@ -450,6 +622,11 @@ class TestXiteFiltering(unittest.TestCase):
         ].children[1]
 
     def test_filter_no_filters(self):
+        # Add priority and date to an item to check for copying
+        self.original_items[0].priority = 1
+        self.original_items[0].target_date = "2025-01-01"
+        self.original_items[0].space_after_status = "  "
+
         filtered = filter_items(
             self.original_items, filter_tags=None, filter_statuses=None
         )
@@ -459,11 +636,16 @@ class TestXiteFiltering(unittest.TestCase):
             _test_format_todo_list(self.original_items),
             "formatted output of filtered list should match original when no filters applied",
         )
-        # check source attributes are copied
+        # check all attributes are copied
         self.assertEqual(
             filtered[0].source_project, self.original_items[0].source_project
         )
         self.assertEqual(filtered[0].source_file, self.original_items[0].source_file)
+        self.assertEqual(filtered[0].priority, self.original_items[0].priority)
+        self.assertEqual(filtered[0].target_date, self.original_items[0].target_date)
+        self.assertEqual(
+            filtered[0].space_after_status, self.original_items[0].space_after_status
+        )
 
     def test_filter_empty_list(self):
         filtered = filter_items([], filter_tags=["projA"], filter_statuses=["new"])
@@ -662,7 +844,10 @@ class TestXiteSorting(unittest.TestCase):
 
 
 def run_main_and_capture(args_list):
-    """helper: runs xite.main with specified args and returns captured stdout."""
+    """helper: runs xite.main with specified args and returns captured stdout.
+
+    stderr is left alone so tests can capture warnings/errors themselves.
+    """
     stdout_capture = io.StringIO()
     with patch("sys.argv", ["xite.py"] + args_list):
         with contextlib.redirect_stdout(stdout_capture):
@@ -671,6 +856,19 @@ def run_main_and_capture(args_list):
             except SystemExit as e:
                 pass
     return stdout_capture.getvalue()
+
+
+def run_main_and_capture_all(args_list):
+    """helper: runs xite.main and returns (stdout, stderr, exit_code)."""
+    out, err = io.StringIO(), io.StringIO()
+    code = 0
+    with patch("sys.argv", ["xite.py"] + args_list):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                main()
+            except SystemExit as e:
+                code = e.code if e.code else 0
+    return out.getvalue(), err.getvalue(), code
 
 
 class TestXiteIntegration(unittest.TestCase):
@@ -712,8 +910,7 @@ class TestXiteIntegration(unittest.TestCase):
             f.write("[?] task from other stuff\n")
 
         with open(self.toml_file_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./project_a", "project_b"] # search relative to toml
 
@@ -741,8 +938,7 @@ tasks = '''
 [ ] task b
 [ ] task c
 '''
-            """
-            )
+            """)
 
     def tearDown(self):
         os.chdir(self.cwd)
@@ -798,16 +994,14 @@ tasks = '''
     def test_toml_custom_roadmap_files(self):
         custom_toml_path = os.path.join(self.test_dir, "custom_meta.toml")
         with open(custom_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./other_stuff"]
 roadmap_files = ["OTHER_TASKS.md", "nonexistent.file"] # custom name + nonexistent
 
 [SomeProject]
 tasks = "[ ] dummy task"
-            """
-            )
+            """)
         output = run_main_and_capture([custom_toml_path])
         self.assertIn("--- other_stuff ---", output)
         self.assertIn("[?] task from other stuff", output)
@@ -883,8 +1077,7 @@ tasks = "[ ] dummy task"
     def test_missing_files_warnings(self):
         bad_toml_path = os.path.join(self.test_dir, "bad_refs.toml")
         with open(bad_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./nonexistent_dir"]
 
@@ -893,8 +1086,7 @@ include_files = ["./nonexistent_file.xit"]
 
 [GoodProject]
 tasks = "[ ] a good task"
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with patch("sys.argv", ["xite.py", bad_toml_path]):
@@ -920,13 +1112,11 @@ tasks = "[ ] a good task"
 
         repo_toml_path = os.path.join(self.test_dir, "repo_test.toml")
         with open(repo_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [MyRepoProject]
 repo = { public = "./my_repo" } # relative path to repo dir from toml
 tasks = "[ ] inline task for repo project"
-            """
-            )
+            """)
 
         output = run_main_and_capture([repo_toml_path])
         self.assertIn("--- MyRepoProject ---", output)
@@ -947,13 +1137,11 @@ tasks = "[ ] inline task for repo project"
 
         depth_toml_path = os.path.join(self.test_dir, "depth_test.toml")
         with open(depth_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["."]
 search_depth = 2 # find level1 and level2, but not level3 (due to pruning)
-            """
-            )
+            """)
 
         output = run_main_and_capture([depth_toml_path])
         # level1 is discovered because '.' is searched, and level1 is a subdir
@@ -980,13 +1168,11 @@ search_depth = 2 # find level1 and level2, but not level3 (due to pruning)
 
         depth_toml_path = os.path.join(self.test_dir, "depth_test_inf.toml")
         with open(depth_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["."]
 search_depth = -1 # infinite depth (but should still prune)
-            """
-            )
+            """)
         output = run_main_and_capture([depth_toml_path])
         self.assertIn("--- level1 ---", output)
         self.assertIn("[ ] task level 1", output)
@@ -1008,13 +1194,11 @@ search_depth = -1 # infinite depth (but should still prune)
 
         prune_toml_path = os.path.join(self.test_dir, "prune_test.toml")
         with open(prune_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["."]
 search_depth = -1 # infinite depth, but should prune at first find
-            """
-            )
+            """)
         output = run_main_and_capture([prune_toml_path])
         self.assertIn("--- prune_l1 ---", output)
         self.assertIn("[ ] task prune level 1", output)
@@ -1025,8 +1209,7 @@ search_depth = -1 # infinite depth, but should prune at first find
     def test_toml_meta_active_order(self):
         active_toml_path = os.path.join(self.test_dir, "active_test.toml")
         with open(active_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./project_a", "./project_b"]
 active = ["Proj2", "project_a"] # specify desired order
@@ -1036,8 +1219,7 @@ tasks = "[ ] proj1 task"
 
 [Proj2]
 tasks = "[ ] proj2 task"
-            """
-            )
+            """)
         output = run_main_and_capture([active_toml_path])
         lines = [line.strip() for line in output.splitlines() if line.strip()]
 
@@ -1064,8 +1246,7 @@ tasks = "[ ] proj2 task"
     def test_toml_invalid_values_warnings(self):
         invalid_toml_path = os.path.join(self.test_dir, "invalid_values.toml")
         with open(invalid_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["valid_dir", 123] # invalid entry (non-string)
 roadmap_files = "not_a_list" # invalid type (not list)
@@ -1078,8 +1259,7 @@ repo = "not_a_dict" # invalid type (not dict)
 
 [GoodProject]
 tasks = "[ ] good task"
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         stdout_capture = io.StringIO()
@@ -1207,8 +1387,7 @@ tasks = "[ ] good task"
     def test_deprecated_project_handling(self):
         deprecated_toml_path = os.path.join(self.test_dir, "deprecated.toml")
         with open(deprecated_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [NormalProject]
 tasks = "[ ] normal task"
 
@@ -1221,8 +1400,7 @@ tasks = '''
 
 [AnotherNormal]
 tasks = "[ ] another normal task"
-            """
-            )
+            """)
 
         # test default behavior (deprecated project skipped)
         output_default = run_main_and_capture([deprecated_toml_path])
@@ -1266,8 +1444,7 @@ tasks = "[ ] another normal task"
     def test_list_projects_order_with_meta_active(self):
         ordered_toml_path = os.path.join(self.test_dir, "ordered_list.toml")
         with open(ordered_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 active = ["ProjC", "ProjA"] # define order
 
@@ -1283,8 +1460,7 @@ tasks = "[ ] c"
 
 [ProjD]
 tasks = "[ ] d"
-            """
-            )
+            """)
 
         # test default (--list-projects, no --include-deprecated)
         # expected order: ProjC, ProjA (from active), then ProjD (remaining, insertion order)
@@ -1324,6 +1500,7 @@ tasks = "[ ] d"
         mock_args = argparse.Namespace(
             filter_tags=None,
             filter_statuses=None,
+            filter_matches=None,
             include_deprecated=False,
             max_projects=None,
             sort_by_status=False,
@@ -1353,13 +1530,11 @@ tasks = "[ ] d"
             self.included_file_path
         )  # use an existing file path as search_dir
         with open(file_as_dir_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [META]
 search_dirs = ["{existing_file}"] # point search_dirs to a file
 search_depth = 1
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with patch("sys.argv", ["xite.py", file_as_dir_toml_path]):
@@ -1379,12 +1554,10 @@ search_depth = 1
     def test_toml_invalid_repo_paths(self):
         invalid_repo_toml_path = os.path.join(self.test_dir, "invalid_repo.toml")
         with open(invalid_repo_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [ProjectWithBadRepos]
 repo = { public = 123, private = ["a", "list"] }
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with patch("sys.argv", ["xite.py", invalid_repo_toml_path]):
@@ -1415,12 +1588,10 @@ repo = { public = 123, private = ["a", "list"] }
     def test_toml_invalid_repo_path_not_none_not_string(self):
         invalid_repo_toml_path = os.path.join(self.test_dir, "invalid_repo_type.toml")
         with open(invalid_repo_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [ProjectWithBadRepoType]
 repo = { public = 123 } # invalid type (int), but not None
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with patch("sys.argv", ["xite.py", invalid_repo_toml_path]):
@@ -1447,12 +1618,10 @@ repo = { public = 123 } # invalid type (int), but not None
             f.write("this is not a directory")
 
         with open(repo_file_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [RepoFileProject]
 repo = {{ public = "{os.path.basename(repo_file_path)}" }}
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with patch("sys.argv", ["xite.py", repo_file_toml_path]):
@@ -1483,12 +1652,10 @@ repo = {{ public = "{os.path.basename(repo_file_path)}" }}
         # don't create the file, let resolve fail later when processing includes
 
         with open(include_err_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [IncludeErrorProject]
 include_files = ["{os.path.basename(bad_include_path)}"]
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         # mock Path.resolve globally to raise error during processing
@@ -1603,13 +1770,11 @@ class TestXiteErrorHandling(unittest.TestCase):
         os.makedirs(scan_dir)
         scan_toml_path = os.path.join(self.test_dir, "scan_error.toml")
         with open(scan_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./scan_me"]
 search_depth = 1
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
@@ -1675,12 +1840,10 @@ search_depth = 1
         # mock resolve globally; error should occur when resolving the toml path itself
         resolve_err_toml_path = Path(self.test_dir) / "resolve_err.toml"
         with open(resolve_err_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./will_fail_resolve"]
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         # run main with the global resolve patch active
@@ -1705,13 +1868,11 @@ search_dirs = ["./will_fail_resolve"]
         walk_err_dir.mkdir()
         walk_err_toml_path = Path(self.test_dir) / "walk_err.toml"
         with open(walk_err_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [META]
 search_dirs = ["{walk_err_dir.name}"]
 search_depth = -1 # trigger os.walk
-            """
-            )
+            """)
 
         stderr_capture = io.StringIO()
         with contextlib.redirect_stderr(stderr_capture):
@@ -1733,13 +1894,11 @@ search_depth = -1 # trigger os.walk
         subdir.mkdir(parents=True)
         walk_onerror_toml_path = Path(self.test_dir) / "walk_onerror.toml"
         with open(walk_onerror_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [META]
 search_dirs = ["{walk_onerror_dir.name}"]
 search_depth = -1 # trigger os.walk
-            """
-            )
+            """)
 
         # configure mock_walk to simulate calling the onerror handler
         mock_exception = OSError("mock walk permission error")
@@ -1864,8 +2023,7 @@ search_depth = -1 # trigger os.walk
         # Setup a specific toml for this test
         interaction_toml_path = os.path.join(self.test_dir, "interaction.toml")
         with open(interaction_toml_path, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 active = ["ProjC", "ProjA"] # A is deprecated
 
@@ -1882,8 +2040,7 @@ tasks = "[ ] c"
 [ProjD] # Deprecated, not in active
 deprecated = true
 tasks = "[ ] d"
-            """
-            )
+            """)
 
         # Case 1: Filter includes deprecated, but --include-deprecated is OFF
         output1 = run_main_and_capture(
@@ -2104,16 +2261,14 @@ tasks = "[ ] d"
 
         dedup_toml_path = os.path.join(self.test_dir, "dedup.toml")
         with open(dedup_toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [META]
 search_dirs = ["."] # discover dedup_repo
 search_depth = 1
 
 [DedupProject]
 repo = {{ public = "./dedup_repo" }} # also define via repo
-            """
-            )
+            """)
 
         output = run_main_and_capture([dedup_toml_path, "--list-projects"])
         listed_projects = output.strip().splitlines()
@@ -2187,13 +2342,11 @@ repo = {{ public = "./dedup_repo" }} # also define via repo
         # use ~ directly, it should expand to the mocked home (test_dir)
         repo_path_str = "~/my_repo_in_home"
         with open(toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [MyHomeRepoProject]
 repo = {{ public = "{repo_path_str}" }}
 tasks = "[ ] inline task"
-            """
-            )
+            """)
 
         # run xite with the toml file
         output = run_main_and_capture([str(toml_path)])
@@ -2234,8 +2387,7 @@ tasks = "[ ] inline task"
         search_path_rel_str = "./rel_search_dir"  # relative path
 
         with open(toml_path, "w") as f:
-            f.write(
-                f"""
+            f.write(f"""
 [META]
 search_dirs = [
     "{search_path_home_str}",
@@ -2243,8 +2395,7 @@ search_dirs = [
     "{search_path_rel_str}"
 ]
 search_depth = 1 # only look inside the specified dirs
-            """
-            )
+            """)
 
         # run xite with the toml file
         output = run_main_and_capture([str(toml_path)])
@@ -2264,8 +2415,7 @@ search_depth = 1 # only look inside the specified dirs
         """test --list-projects filters projects listed in META.active (covers line 265)."""
         filter_active_toml = Path(self.test_dir) / "filter_active.toml"
         with open(filter_active_toml, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 active = ["ProjA", "ProjB"]
 
@@ -2274,8 +2424,7 @@ tasks = "[ ] a"
 
 [ProjB]
 tasks = "[ ] b"
-            """
-            )
+            """)
         # Filter *out* ProjA, keep ProjB
         output = run_main_and_capture(
             [str(filter_active_toml), "--list-projects", "--project", "ProjB"]
@@ -2286,16 +2435,14 @@ tasks = "[ ] b"
         """test --list-projects filters projects *not* listed in META.active (covers line 271)."""
         filter_nonactive_toml = Path(self.test_dir) / "filter_nonactive.toml"
         with open(filter_nonactive_toml, "w") as f:
-            f.write(
-                """
+            f.write("""
 # No META.active
 [ProjC]
 tasks = "[ ] c"
 
 [ProjD]
 tasks = "[ ] d"
-            """
-            )
+            """)
         # Filter *out* ProjD, keep ProjC
         output = run_main_and_capture(
             [str(filter_nonactive_toml), "--list-projects", "--project", "ProjC"]
@@ -2316,13 +2463,11 @@ tasks = "[ ] d"
 
         prune_toml = Path(self.test_dir) / "prune_nested.toml"
         with open(prune_toml, "w") as f:
-            f.write(
-                """
+            f.write("""
 [META]
 search_dirs = ["./basedir"]
 search_depth = -1 # infinite depth needed to reach inner_proj potential
-            """
-            )
+            """)
 
         output = run_main_and_capture([str(prune_toml)])
         # Expect only outer_proj, as inner_proj should be pruned because outer_proj
@@ -2343,6 +2488,638 @@ search_depth = -1 # infinite depth needed to reach inner_proj potential
     # Note: The test 'test_list_projects_filter_interactions' was moved from
     # TestXiteErrorHandling to TestXiteIntegration as it tests core functionality,
     # not just error handling.
+
+
+class TestXiteEditing(unittest.TestCase):
+    """end-to-end tests for command-line task editing (--add, --set-status)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir)
+
+    def run_xite(self, args_list):
+        return run_main_and_capture_all(args_list)
+
+    def write_file(self, name, content):
+        path = os.path.join(self.test_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def read_file(self, name):
+        with open(os.path.join(self.test_dir, name)) as f:
+            return f.read()
+
+    # --- --add ---
+
+    def test_add_appends_after_last_task(self):
+        self.write_file("todos.xit", "[ ] first task\n[x] second task\n")
+        out, _, code = self.run_xite(["--add", "new task", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("[ ] new task", out)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[ ] first task\n[x] second task\n[ ] new task\n",
+        )
+
+    def test_add_with_status_and_tags(self):
+        self.write_file("todos.xit", "[ ] first task\n")
+        out, _, code = self.run_xite(
+            ["--add", "ship it", "--set-status", "blocked", "--tag", "v1", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("[!] ship it #v1", out)
+        self.assertIn("[!] ship it #v1\n", self.read_file("todos.xit"))
+
+    def test_add_creates_missing_file(self):
+        _, _, code = self.run_xite(["--add", "fresh idea", "brand.xit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.read_file("brand.xit"), "[ ] fresh idea\n")
+
+    def test_add_to_file_without_tasks(self):
+        self.write_file("notes.md", "# notes\n\nnothing here yet\n")
+        _, _, code = self.run_xite(["--add", "do it", "notes.md"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("notes.md"),
+            "# notes\n\nnothing here yet\n[ ] do it\n",
+        )
+
+    def test_add_inserts_after_continuation_lines(self):
+        self.write_file(
+            "todos.xit",
+            "[ ] first task\n    continued thought\n[x] done task\n        more detail\n",
+        )
+        _, _, code = self.run_xite(["--add", "another", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[ ] first task\n    continued thought\n"
+            "[x] done task\n        more detail\n[ ] another\n",
+        )
+
+    def test_add_into_fenced_block_keeps_fence_closed(self):
+        self.write_file(
+            "README-like.md", "intro\n\n```\n[ ] inside fence\n```\n\nfooter\n"
+        )
+        _, _, code = self.run_xite(["--add", "more inside", "README-like.md"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("README-like.md"),
+            "intro\n\n```\n[ ] inside fence\n[ ] more inside\n```\n\nfooter\n",
+        )
+
+    def test_add_rejects_multiple_files(self):
+        self.write_file("a.xit", "[ ] a\n")
+        self.write_file("b.xit", "[ ] b\n")
+        _, err, code = self.run_xite(["--add", "x", "a.xit", "b.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("a.xit"), "[ ] a\n")
+
+    def test_add_rejects_toml_file(self):
+        self.write_file("tracker.toml", "[META]\n")
+        _, err, code = self.run_xite(["--add", "x", "tracker.toml"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("tracker.toml"), "[META]\n")
+
+    def test_add_rejects_match_and_status_filter(self):
+        self.write_file("todos.xit", "[ ] a\n")
+        _, err, code = self.run_xite(
+            ["--add", "x", "--match", "a", "--status", "new", "todos.xit"]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("todos.xit"), "[ ] a\n")
+
+    # --- --set-status ---
+
+    def test_set_status_by_match_preserves_formatting(self):
+        self.write_file(
+            "todos.xit",
+            "[ ] fix bug #triage\n- [ ] markdown task\n    [@] nested active\n",
+        )
+        out, _, code = self.run_xite(
+            ["--set-status", "active", "--match", "fix bug", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("[@] fix bug #triage", out)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[@] fix bug #triage\n- [ ] markdown task\n    [@] nested active\n",
+        )
+
+    def test_set_status_match_is_case_insensitive_substring(self):
+        self.write_file("todos.xit", "[ ] Fix the FLUb flask\n[ ] other\n")
+        _, _, code = self.run_xite(["--set-status", "complete", "--match", "flub", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("todos.xit"), "[x] Fix the FLUb flask\n[ ] other\n"
+        )
+
+    def test_set_status_preserves_markdown_marker_and_spacing(self):
+        self.write_file("todos.xit", "  - [ ] indented dash task\n")
+        _, _, code = self.run_xite(
+            ["--set-status", "complete", "--match", "dash", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.read_file("todos.xit"), "  - [x] indented dash task\n")
+
+    def test_set_status_by_tag(self):
+        self.write_file(
+            "todos.xit", "[ ] one #v1\n[x] two #v1\n[ ] three #v2\n"
+        )
+        _, _, code = self.run_xite(
+            ["--set-status", "deferred", "--tag", "v1", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[>] one #v1\n[>] two #v1\n[ ] three #v2\n",
+        )
+
+    def test_set_status_by_current_status(self):
+        self.write_file("todos.xit", "[ ] one\n[ ] two\n[x] three\n")
+        out, _, code = self.run_xite(
+            ["--set-status", "active", "--status", "new", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("[@]"), 2)
+        self.assertEqual(
+            self.read_file("todos.xit"), "[@] one\n[@] two\n[x] three\n"
+        )
+
+    def test_set_status_requires_a_selector(self):
+        self.write_file("todos.xit", "[ ] a\n")
+        _, err, code = self.run_xite(["--set-status", "complete", "todos.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("todos.xit"), "[ ] a\n")
+
+    def test_set_status_no_match_leaves_file_unchanged(self):
+        self.write_file("todos.xit", "[ ] a\n")
+        _, err, code = self.run_xite(["--set-status", "complete", "--match", "zzz", "todos.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("todos.xit"), "[ ] a\n")
+
+    def test_set_status_requires_existing_file(self):
+        _, err, code = self.run_xite(["--set-status", "complete", "--match", "x", "nope.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+
+    def test_set_status_rejects_multiple_files(self):
+        self.write_file("a.xit", "[ ] a\n")
+        self.write_file("b.xit", "[ ] a\n")
+        _, err, code = self.run_xite(
+            ["--set-status", "complete", "--match", "a", "a.xit", "b.xit"]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("a.xit"), "[ ] a\n")
+        self.assertEqual(self.read_file("b.xit"), "[ ] a\n")
+
+    def test_set_status_rejects_toml_file(self):
+        self.write_file("tracker.toml", '[p]\ntasks = """\n[ ] x\n"""\n')
+        _, err, code = self.run_xite(
+            ["--set-status", "complete", "--match", "x", "tracker.toml"]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+
+    # --- --match as a read-mode filter ---
+
+    def test_match_filters_listed_tasks(self):
+        self.write_file(
+            "todos.xit",
+            "[ ] write the docs\n[x] ship v1\n    [x] polish docs formatting\n[ ] unrelated\n",
+        )
+        out = run_main_and_capture(["--match", "docs", "todos.xit"])
+        self.assertIn("write the docs", out)
+        self.assertIn("polish docs formatting", out)
+        # "ship v1" is kept only as context for its matching child; "unrelated" is gone
+        self.assertNotIn("unrelated", out)
+
+    def test_match_is_case_insensitive(self):
+        self.write_file("todos.xit", "[ ] Write The DOCS\n[ ] other\n")
+        out = run_main_and_capture(["--match", "the docs", "todos.xit"])
+        self.assertIn("Write The DOCS", out)
+        self.assertNotIn("other", out)
+
+    def test_multiple_matches_are_ored(self):
+        self.write_file("todos.xit", "[ ] alpha\n[ ] beta\n[ ] gamma\n")
+        out = run_main_and_capture(["--match", "alpha", "--match", "beta", "todos.xit"])
+        self.assertIn("alpha", out)
+        self.assertIn("beta", out)
+        self.assertNotIn("gamma", out)
+
+    def test_match_combined_with_status_is_anded(self):
+        self.write_file("todos.xit", "[ ] docs one\n[x] docs two\n[ ] other\n")
+        out = run_main_and_capture(["--match", "docs", "--status", "new", "todos.xit"])
+        self.assertIn("docs one", out)
+        self.assertNotIn("docs two", out)
+        self.assertNotIn("other", out)
+
+    def test_match_matches_continuation_lines(self):
+        self.write_file("todos.xit", "[ ] parent task\n    extended with flurb\n[ ] nope\n")
+        out = run_main_and_capture(["--match", "flurb", "todos.xit"])
+        self.assertIn("parent task", out)
+        self.assertNotIn("nope", out)
+
+    def test_match_with_no_results_prints_nothing(self):
+        self.write_file("todos.xit", "[ ] a\n")
+        out = run_main_and_capture(["--match", "dfkljdflkjd", "todos.xit"])
+        self.assertEqual(out.strip(), "")
+
+    def test_added_task_is_readable_by_filters(self):
+        self.write_file("todos.xit", "[ ] a\n")
+        self.run_xite(["--add", "shiny new", "--set-status", "blocked", "todos.xit"])
+        out = run_main_and_capture(["--status", "blocked", "todos.xit"])
+        self.assertIn("[!] shiny new", out)
+
+
+class TestXiteStableIds(unittest.TestCase):
+    """end-to-end tests for --show-ids stable task identifiers."""
+
+    ID_LINE_RE = re.compile(r"( *)([0-9a-f]{8}) (\[.\] .*)")
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir)
+
+    def write_file(self, name, content):
+        path = os.path.join(self.test_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def parse_id_lines(self, output):
+        """extract (indent, id, rest) tuples from id-prefixed output lines."""
+        entries = []
+        for line in output.splitlines():
+            m = self.ID_LINE_RE.search(line)
+            if m:
+                entries.append((m.group(1), m.group(2), m.group(3)))
+        return entries
+
+    def test_show_ids_prints_hex_id_per_task(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        out = run_main_and_capture(["--show-ids", "todos.xit"])
+        entries = self.parse_id_lines(out)
+        self.assertEqual(len(entries), 2)
+        for _, task_id, _ in entries:
+            self.assertEqual(len(task_id), 8)
+        self.assertIn("alpha task", entries[0][2])
+        self.assertIn("beta task", entries[1][2])
+
+    def test_ids_omitted_without_flag(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        out = run_main_and_capture(["todos.xit"])
+        self.assertEqual(self.parse_id_lines(out), [])
+        self.assertIn("[ ] alpha task", out)
+
+    def test_ids_are_stable_across_runs(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        first = run_main_and_capture(["--show-ids", "todos.xit"])
+        second = run_main_and_capture(["--show-ids", "todos.xit"])
+        self.assertEqual(first, second)
+        entries = self.parse_id_lines(first)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries, self.parse_id_lines(second))
+
+    def test_ids_match_between_full_and_filtered_output(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        full = run_main_and_capture(["--show-ids", "todos.xit"])
+        filtered = run_main_and_capture(
+            ["--show-ids", "--status", "complete", "todos.xit"]
+        )
+        full_entries = dict(
+            (rest, task_id) for _, task_id, rest in self.parse_id_lines(full)
+        )
+        filtered_entries = dict(
+            (rest, task_id) for _, task_id, rest in self.parse_id_lines(filtered)
+        )
+        self.assertEqual(len(filtered_entries), 1)
+        self.assertEqual(filtered_entries, {k: v for k, v in full_entries.items() if "beta" in k})
+
+    def test_editing_task_text_changes_only_that_id(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        before = dict(
+            (rest, task_id)
+            for _, task_id, rest in self.parse_id_lines(
+                run_main_and_capture(["--show-ids", "todos.xit"])
+            )
+        )
+        self.write_file("todos.xit", "[ ] alpha task edited\n[x] beta task\n")
+        after = dict(
+            (rest, task_id)
+            for _, task_id, rest in self.parse_id_lines(
+                run_main_and_capture(["--show-ids", "todos.xit"])
+            )
+        )
+        alpha_before = next(tid for rest, tid in before.items() if "alpha" in rest)
+        alpha_after = next(tid for rest, tid in after.items() if "alpha" in rest)
+        beta_before = next(tid for rest, tid in before.items() if "beta" in rest)
+        beta_after = next(tid for rest, tid in after.items() if "beta" in rest)
+        self.assertNotEqual(alpha_before, alpha_after)
+        self.assertEqual(beta_before, beta_after)
+
+    def test_duplicate_tasks_get_distinct_ids(self):
+        self.write_file("todos.xit", "[ ] same text\n[ ] same text\n")
+        entries = self.parse_id_lines(run_main_and_capture(["--show-ids", "todos.xit"]))
+        self.assertEqual(len(entries), 2)
+        self.assertNotEqual(entries[0][1], entries[1][1])
+
+    def test_children_get_ids_at_their_indent(self):
+        self.write_file(
+            "todos.xit", "[ ] parent task\n    [ ] child task\n        [ ] grandchild\n"
+        )
+        entries = self.parse_id_lines(run_main_and_capture(["--show-ids", "todos.xit"]))
+        self.assertEqual(len(entries), 3)
+        self.assertEqual(entries[0][0], "")
+        self.assertEqual(entries[1][0], "    ")
+        self.assertEqual(entries[2][0], "        ")
+
+    def test_ids_differ_between_projects(self):
+        os.makedirs(os.path.join(self.test_dir, "proj_a"))
+        os.makedirs(os.path.join(self.test_dir, "proj_b"))
+        self.write_file("proj_a/ROADMAP.md", "[ ] shared text\n")
+        self.write_file("proj_b/ROADMAP.md", "[ ] shared text\n")
+        entries = self.parse_id_lines(
+            run_main_and_capture(["--show-ids", self.test_dir])
+        )
+        self.assertEqual(len(entries), 2)
+        self.assertNotEqual(entries[0][1], entries[1][1])
+
+
+class TestXiteIdSelectors(unittest.TestCase):
+    """end-to-end tests for selecting and editing tasks by stable id."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir)
+
+    def run_xite(self, args_list):
+        return run_main_and_capture_all(args_list)
+
+    def write_file(self, name, content):
+        path = os.path.join(self.test_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def read_file(self, name):
+        with open(os.path.join(self.test_dir, name)) as f:
+            return f.read()
+
+    def id_of(self, filename, text):
+        """returns the id printed for the first task containing text."""
+        out = run_main_and_capture(["--show-ids", filename])
+        for line in out.splitlines():
+            m = re.search(r"([0-9a-f]{8}) (\[.\] .*)", line)
+            if m and text in m.group(2):
+                return m.group(1)
+        self.fail(f"no id found for {text!r} in {out!r}")
+
+    def test_match_by_full_id_lists_only_that_task(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        target = self.id_of("todos.xit", "alpha")
+        out = run_main_and_capture(["--id", target, "todos.xit"])
+        self.assertIn("alpha task", out)
+        self.assertNotIn("beta task", out)
+
+    def test_match_by_id_prefix(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[x] beta task\n")
+        target = self.id_of("todos.xit", "alpha")
+        out = run_main_and_capture(["--id", target[:4], "todos.xit"])
+        self.assertIn("alpha task", out)
+        self.assertNotIn("beta task", out)
+
+    def test_unknown_id_lists_nothing(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        out = run_main_and_capture(["--id", "ffffffff", "todos.xit"])
+        self.assertEqual(out.strip(), "")
+
+    def test_id_filter_anded_with_status(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        target = self.id_of("todos.xit", "alpha")
+        out = run_main_and_capture(["--id", target, "--status", "complete", "todos.xit"])
+        self.assertEqual(out.strip(), "")
+        out = run_main_and_capture(["--id", target, "--status", "new", "todos.xit"])
+        self.assertIn("alpha task", out)
+
+    def test_children_get_distinct_ids_across_projects(self):
+        os.makedirs(os.path.join(self.test_dir, "proj_a"))
+        os.makedirs(os.path.join(self.test_dir, "proj_b"))
+        self.write_file("proj_a/ROADMAP.md", "[ ] parent\n    [ ] shared child\n")
+        self.write_file("proj_b/ROADMAP.md", "[ ] parent\n    [ ] shared child\n")
+        out = run_main_and_capture(["--show-ids", self.test_dir])
+        child_ids = [
+            m.group(1)
+            for line in out.splitlines()
+            if (m := re.search(r"([0-9a-f]{8}) \[.\] shared child", line))
+        ]
+        self.assertEqual(len(child_ids), 2)
+        self.assertNotEqual(child_ids[0], child_ids[1])
+
+    def test_set_status_by_id_edits_only_that_task(self):
+        self.write_file("todos.xit", "[ ] alpha task\n[ ] beta task\n")
+        target = self.id_of("todos.xit", "alpha")
+        out, _, code = self.run_xite(["--set-status", "complete", "--id", target, "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("[x] alpha task", out)
+        self.assertEqual(self.read_file("todos.xit"), "[x] alpha task\n[ ] beta task\n")
+
+    def test_set_status_by_id_prefix_edits_all_matches(self):
+        self.write_file(
+            "todos.xit", "[ ] alpha task\n[ ] alpha two\n[ ] beta task\n[x] delta\n"
+        )
+        ids = {
+            name: self.id_of("todos.xit", name)
+            for name in ("alpha task", "alpha two", "beta task", "delta")
+        }
+        first, second = ids["alpha task"], ids["alpha two"]
+        prefix = os.path.commonprefix([first, second]) or first[:4]
+        expected = {name for name, tid in ids.items() if tid.startswith(prefix)}
+        self.assertIn("alpha task", expected)
+        _, _, code = self.run_xite(["--set-status", "blocked", "--id", prefix, "todos.xit"])
+        self.assertEqual(code, 0)
+        content = self.read_file("todos.xit")
+        original = {"alpha task": " ", "alpha two": " ", "beta task": " ", "delta": "x"}
+        for name in ids:
+            marker = "!" if name in expected else original[name]
+            for line in content.splitlines():
+                if name in line:
+                    self.assertTrue(line.startswith(f"[{marker}]"), f"{name}: {line}")
+                    break
+            else:
+                self.fail(f"{name} missing from {content!r}")
+
+    def test_set_status_by_unknown_id_fails_unchanged(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        _, err, code = self.run_xite(
+            ["--set-status", "complete", "--id", "ffffffff", "todos.xit"]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("todos.xit"), "[ ] alpha task\n")
+
+    def test_set_status_by_id_with_child_task(self):
+        self.write_file("todos.xit", "[ ] parent task\n    [ ] child task\n")
+        target = self.id_of("todos.xit", "child task")
+        _, _, code = self.run_xite(
+            ["--set-status", "active", "--id", target, "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("todos.xit"), "[ ] parent task\n    [@] child task\n"
+        )
+
+    def test_id_survives_status_edit_through_id(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        target = self.id_of("todos.xit", "alpha")
+        _, _, code = self.run_xite(
+            ["--set-status", "complete", "--id", target, "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(self.id_of("todos.xit", "alpha"), target)
+
+    def test_add_rejects_id_selector(self):
+        self.write_file("todos.xit", "[ ] alpha task\n")
+        _, err, code = self.run_xite(["--add", "new", "--id", "abcd1234", "todos.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
+        self.assertEqual(self.read_file("todos.xit"), "[ ] alpha task\n")
+
+
+class TestXiteStatusLists(unittest.TestCase):
+    """end-to-end tests for comma separated --status selections."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.test_dir)
+        self.write_file(
+            "todos.xit",
+            "[ ] alpha task #work\n"
+            "[@] beta task #work\n"
+            "[x] gamma task #work\n"
+            "[!] delta task #home\n",
+        )
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir)
+
+    def write_file(self, name, content):
+        with open(os.path.join(self.test_dir, name), "w") as f:
+            f.write(content)
+
+    def read_file(self, name):
+        with open(os.path.join(self.test_dir, name)) as f:
+            return f.read()
+
+    def run_xite(self, args_list):
+        return run_main_and_capture_all(args_list)
+
+    def test_comma_separated_status_matches_both(self):
+        out, _, code = self.run_xite(["--status=new,active", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("alpha task", out)
+        self.assertIn("beta task", out)
+        self.assertNotIn("gamma task", out)
+        self.assertNotIn("delta task", out)
+
+    def test_comma_separated_status_as_separate_argument(self):
+        out, _, code = self.run_xite(["--status", "new,complete", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("alpha task", out)
+        self.assertIn("gamma task", out)
+        self.assertNotIn("beta task", out)
+
+    def test_comma_separated_status_tolerates_whitespace(self):
+        out, _, code = self.run_xite(["--status=new , blocked", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("alpha task", out)
+        self.assertIn("delta task", out)
+        self.assertNotIn("beta task", out)
+
+    def test_comma_separated_status_combines_with_repeated_flag(self):
+        out, _, code = self.run_xite(
+            ["--status=new,complete", "--status=deferred", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("alpha task", out)
+        self.assertIn("gamma task", out)
+        self.assertNotIn("beta task", out)
+        self.assertNotIn("delta task", out)
+
+    def test_single_status_still_works(self):
+        out, _, code = self.run_xite(["--status=active", "todos.xit"])
+        self.assertEqual(code, 0)
+        self.assertIn("beta task", out)
+        self.assertNotIn("alpha task", out)
+
+    def test_comma_separated_status_ands_with_tag(self):
+        out, _, code = self.run_xite(
+            ["--status=new,active", "--tag=home", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "")
+
+    def test_set_status_with_status_list_edits_only_matches(self):
+        _, _, code = self.run_xite(
+            ["--set-status", "complete", "--status=new,blocked", "todos.xit"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[x] alpha task #work\n"
+            "[@] beta task #work\n"
+            "[x] gamma task #work\n"
+            "[x] delta task #home\n",
+        )
+
+    def test_invalid_status_in_list_is_rejected(self):
+        _, err, code = self.run_xite(["--status=new,fnord", "todos.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("fnord", err)
+        self.assertIn("new", err)
+
+    def test_invalid_status_in_list_blocks_edit(self):
+        _, err, code = self.run_xite(
+            ["--set-status", "complete", "--status=fnord,new", "todos.xit"]
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIn("fnord", err)
+        self.assertEqual(
+            self.read_file("todos.xit"),
+            "[ ] alpha task #work\n"
+            "[@] beta task #work\n"
+            "[x] gamma task #work\n"
+            "[!] delta task #home\n",
+        )
+
+    def test_empty_status_entry_is_rejected(self):
+        _, err, code = self.run_xite(["--status=new,", "todos.xit"])
+        self.assertNotEqual(code, 0)
+        self.assertIn("error", err)
 
 
 if __name__ == "__main__":

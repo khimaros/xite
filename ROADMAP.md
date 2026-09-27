@@ -1,16 +1,23 @@
 # ROADMAP
 
 ```
-[@] backward compatibility with [x]it specification
-    [ ] support target dates
-    [ ] support prioritization
-    [ ] support grouping tasks
+[ ] xite --format to group the roadmap items by status
+[ ] reimplement the entire project in rust
+
+[>] backward compatibility with [x]it specification
+    [>] support grouping tasks
+    [x] support target dates
+    [x] support prioritization
     [x] support line continuations on task names
     [x] support standard statuses {open,ongoing,checked,obsolete,in question}
     [x] parse basic `.xit` file format
     [x] support for #tags
-[@] lossless round tripping back to original text format
-    [ ] preserve all white space
+
+[x] allow selecting multiple (OR) statuses with --status=new,active
+[x] enable matching (and editing) by task id
+[x] add a flag to output a stable id with each task
+[x] lossless round tripping back to original text format
+    [x] preserve all white space
     [x] preserve all non-whitespace formatting
 [x] handle child tasks (unlimited levels of nesting)
 [x] parse TOML files with nested project definitions

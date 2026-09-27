@@ -1,0 +1,9 @@
+[ ] simple date -> 2025-07-31
+[ ] date with text -> 2025-08-01 do something
+[ ] text with date do something -> 2025-08-15
+[ ] partial date year-month -> 2025-09
+[ ] partial date year -> 2025
+[ ] date inside text (first one wins) -> 2025-10-10 and also -> 2025-11-11
+[ ] no date
+[ ] invalid arrow ->2025-01-01
+[ ] invalid arrow - > 2025-01-01

@@ -1,0 +1,9 @@
+[ ] no priority
+[ ] ! high priority
+[ ] !! very high priority
+[ ] . low priority
+[ ] .. very low priority
+[ ] !. mixed is not a priority
+[ ] .! mixed is not a priority
+[ ] !not a priority (no space)
+[ ] ! a ! b priority is 1

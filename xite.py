@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -11,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
 
-
 ###############
 ## CONSTANTS ##
 ###############
@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Set, Union
 
 INDENT_SPACES = 4
 UNSPECIFIED_SOURCE = "__unspecified__"
+ID_LENGTH = 8  # hex chars of the content-derived task id
 
 STATUS_MAP = {
     " ": "new",
@@ -32,8 +33,8 @@ STATUS_MAP = {
 REVERSE_STATUS_MAP = {v: k for k, v in STATUS_MAP.items()}
 VALID_STATUS_CHARS = "".join(map(re.escape, STATUS_MAP.keys()))
 
-# regex: captures indent, optional markdown list marker ' ', status char, rest of line
-TODO_ITEM_REGEX = re.compile(rf"^( *)(?:- )?(?:\[([{VALID_STATUS_CHARS}])\])\s*(.*)")
+# regex: captures indent, optional markdown list marker ' ', status char, required space, rest of line
+TODO_ITEM_REGEX = re.compile(rf"^( *)(?:- )?(?:\[([{VALID_STATUS_CHARS}])\])(\s+)(.*)")
 # regex: extracts #tags from text
 TAG_REGEX = re.compile(r"#(\w+)")
 
@@ -63,11 +64,16 @@ class TodoItem:
     text: str
     status: str
     level: int  # 0-based indentation level
+    priority: Optional[int] = None
+    target_date: Optional[str] = None
+    space_after_status: str = " "
     tags: List[str] = field(default_factory=list)
     children: List["TodoItem"] = field(default_factory=list)
     parent: Optional["TodoItem"] = None
     source_project: Optional[str] = None
     source_file: Optional[str] = None
+    task_id: Optional[str] = None
+    line_num: Optional[int] = None
 
 
 #############
@@ -82,10 +88,11 @@ def parse_todo_list(text: str) -> List[TodoItem]:
     last_item: Optional[TodoItem] = None
     last_item_indent_len: int = -1
 
-    for line_num, line in enumerate(text.strip().splitlines(), 1):
+    # note: no strip() here so line_num matches the original file's lines
+    for line_num, line in enumerate(text.splitlines(), 1):
         match = TODO_ITEM_REGEX.match(line)
         if match:
-            indentation, status_char, item_text = match.groups()
+            indentation, status_char, space_after_status, item_text = match.groups()
             item_indent_len = len(indentation)
 
             # enforce consistent indentation
@@ -98,9 +105,35 @@ def parse_todo_list(text: str) -> List[TodoItem]:
 
             level = item_indent_len // INDENT_SPACES
             status = STATUS_MAP.get(status_char, "unknown")
+
+            priority = None
+            priority_match = re.match(r"(!+|\.+)\s+(.*)", item_text)
+            if priority_match:
+                markers, rest_of_text = priority_match.groups()
+                if all(c == "!" for c in markers):
+                    priority = len(markers)
+                    item_text = rest_of_text
+                elif all(c == "." for c in markers):
+                    priority = -len(markers)
+                    item_text = rest_of_text
+
+            target_date = None
+            date_regex = r"\s*->\s+(\d{4}(?:-\d{2}(?:-\d{2})?)?)"
+            date_match = re.search(date_regex, item_text)
+            if date_match:
+                target_date = date_match.group(1)
+                item_text = re.sub(date_regex, "", item_text, 1)
+
             tags = TAG_REGEX.findall(item_text)
             item = TodoItem(
-                text=item_text.strip(), status=status, level=level, tags=tags
+                text=item_text.strip(),
+                status=status,
+                level=level,
+                priority=priority,
+                target_date=target_date,
+                space_after_status=space_after_status,
+                tags=tags,
+                line_num=line_num,
             )
 
             while parent_stack and parent_stack[-1].level >= level:
@@ -133,16 +166,32 @@ def parse_todo_list(text: str) -> List[TodoItem]:
 ################
 
 
-def _format_recursive(item: TodoItem, lines: List[str]):
+def _format_recursive(item: TodoItem, lines: List[str], show_ids: bool = False):
     """helper to recursively format an item and its children."""
     base_indent = " " * (item.level * INDENT_SPACES)
+    id_prefix = f"{item.task_id} " if show_ids and item.task_id else ""
     status_char = REVERSE_STATUS_MAP.get(
         item.status, " "
     )  # use space ' ' for unknown status
     text_lines = item.text.splitlines()
     first_line_text = text_lines[0] if text_lines else ""
 
-    lines.append(f"{base_indent}[{status_char}] {first_line_text}")
+    if item.priority is not None:
+        if item.priority > 0:
+            priority_str = "!" * item.priority
+        elif item.priority < 0:
+            priority_str = "." * -item.priority
+        else:
+            priority_str = ""
+        prefix = f"{priority_str} " if priority_str else ""
+    else:
+        prefix = ""
+
+    suffix = f" -> {item.target_date}" if item.target_date else ""
+
+    lines.append(
+        f"{base_indent}{id_prefix}[{status_char}]{item.space_after_status}{prefix}{first_line_text}{suffix}"
+    )
 
     # continuation lines indented relative to the start of the task text
     continuation_indent = base_indent + " " * INDENT_SPACES
@@ -150,7 +199,7 @@ def _format_recursive(item: TodoItem, lines: List[str]):
         lines.append(f"{continuation_indent}{continuation_line}")
 
     for child in item.children:
-        _format_recursive(child, lines)
+        _format_recursive(child, lines, show_ids)
 
 
 ###############
@@ -158,54 +207,76 @@ def _format_recursive(item: TodoItem, lines: List[str]):
 ###############
 
 
+def _text_matches(text: str, patterns: List[str]) -> bool:
+    """returns true if the text contains any pattern (case-insensitive)."""
+    lowered = text.lower()
+    return any(p.lower() in lowered for p in patterns)
+
+
 def filter_items(
     items: List[TodoItem],
     filter_tags: Optional[List[str]],
     filter_statuses: Optional[List[str]],
+    filter_matches: Optional[List[str]] = None,
+    filter_ids: Optional[List[str]] = None,
 ) -> List[TodoItem]:
     """
-    recursively filters items by tags and/or statuses.
+    recursively filters items by text patterns, tags, and/or statuses.
 
     keeps an item if:
-    1. it directly matches the filters (tags and/or statuses).
+    1. it directly matches the filters (all active criteria must hold).
        -> includes a deep copy of its *original* children.
     2. it doesn't match directly, but has descendants that *do* match.
        -> includes only the matching descendants (and their ancestors).
 
     returns a new list of items, preserving necessary hierarchy.
     """
-    if not filter_tags and not filter_statuses:
+    if not filter_tags and not filter_statuses and not filter_matches and not filter_ids:
         return deepcopy(items)  # no filters? return a full copy
 
     filtered_list: List[TodoItem] = []
     tag_filter_set = set(filter_tags) if filter_tags else set()
     status_filter_set = set(filter_statuses) if filter_statuses else set()
+    match_pats = list(filter_matches) if filter_matches else []
+    id_pats = [p.lower() for p in filter_ids] if filter_ids else []
 
     for item in items:
-        kept_children = filter_items(item.children, filter_tags, filter_statuses)
+        kept_children = filter_items(
+            item.children, filter_tags, filter_statuses, match_pats, id_pats
+        )
 
         matches_tag = tag_filter_set and not tag_filter_set.isdisjoint(item.tags)
         matches_status = status_filter_set and item.status in status_filter_set
+        matches_text = match_pats and _text_matches(item.text, match_pats)
+        matches_id = bool(
+            id_pats
+            and item.task_id
+            and any(item.task_id.startswith(p) for p in id_pats)
+        )
 
-        if tag_filter_set and status_filter_set:
-            direct_match = matches_tag and matches_status
-        elif tag_filter_set:
-            direct_match = matches_tag
-        elif status_filter_set:
-            direct_match = matches_status
-        else:
-            # no filters active means no direct match possible here (handled above)
-            direct_match = False
+        direct_match = True
+        if tag_filter_set:
+            direct_match = direct_match and matches_tag
+        if status_filter_set:
+            direct_match = direct_match and matches_status
+        if match_pats:
+            direct_match = direct_match and matches_text
+        if id_pats:
+            direct_match = direct_match and matches_id
 
         if direct_match or kept_children:
             item_copy = TodoItem(
                 text=item.text,
                 status=item.status,
                 level=item.level,
+                priority=item.priority,
+                target_date=item.target_date,
+                space_after_status=item.space_after_status,
                 tags=list(item.tags),
                 parent=None,  # parent link reset by caller if needed
                 source_project=item.source_project,
                 source_file=item.source_file,
+                task_id=item.task_id,
             )
 
             if direct_match:
@@ -237,6 +308,45 @@ def sort_items_by_status(items: List[TodoItem]):
 ###############
 ## UTILITIES ##
 ###############
+
+
+def _source_key(item: TodoItem) -> str:
+    """identity of the item's source, used for grouping and id hashing."""
+    return item.source_file or item.source_project or UNSPECIFIED_SOURCE
+
+
+def _effective_source_key(item: TodoItem, inherited: Optional[str]) -> str:
+    """
+    source key for id hashing; children inherit the source of their parent
+    since source info is only assigned to root items during collection.
+    """
+    if item.source_file or item.source_project:
+        return _source_key(item)
+    return inherited if inherited is not None else UNSPECIFIED_SOURCE
+
+
+def _assign_task_ids(
+    items: List[TodoItem],
+    seen: Optional[Dict] = None,
+    inherited_source: Optional[str] = None,
+):
+    """
+    assigns a content-derived stable id to each item (in-place, recursive).
+
+    ids are the hash of the source and task text, so they are deterministic
+    across runs and change only when the task or its source changes.
+    repeated identical texts within a source get distinct ids via a counter.
+    """
+    if seen is None:
+        seen = {}
+    for item in items:
+        source = _effective_source_key(item, inherited_source)
+        key = (source, item.text)
+        count = seen.get(key, 0)
+        seen[key] = count + 1
+        seed = f"{key[0]}\0{key[1]}" + (f"\0{count}" if count else "")
+        item.task_id = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:ID_LENGTH]
+        _assign_task_ids(item.children, seen, source)
 
 
 def _print_warning(message: str):
@@ -570,6 +680,232 @@ def _discover_projects_in_search_dir(
 
 
 #####################
+## TASK EDITING MODE ##
+#####################
+
+
+def _resolve_edit_file(files: List[Path]) -> Path:
+    """validates the single target file for a mutation command and exits on error."""
+    if len(files) != 1:
+        _print_error("editing requires exactly one file argument")
+        sys.exit(1)
+    path = files[0]
+    if path.suffix.lower() == ".toml":
+        _print_error(f"cannot edit tasks inside a toml file: {path}")
+        sys.exit(1)
+    if path.is_dir():
+        _print_error(f"cannot edit a directory: {path}")
+        sys.exit(1)
+    return path
+
+
+def _apply_status_line(
+    line: str,
+    match,  # re.Match for TODO_ITEM_REGEX against the line
+    new_status_char: str,
+    match_pats: List[str],
+    tag_filter: Set[str],
+    status_filter: Set[str],
+    id_filter: Optional[List[str]] = None,
+    task_id: Optional[str] = None,
+) -> Optional[str]:
+    """returns the line rewritten with the new status char, or none if unmatched."""
+    indent, status_char, space_after_status, rest = match.groups()
+    status = STATUS_MAP.get(status_char, "unknown")
+
+    if status_filter and status not in status_filter:
+        return None
+    if tag_filter and tag_filter.isdisjoint(TAG_REGEX.findall(rest)):
+        return None
+    if match_pats and not _text_matches(rest, match_pats):
+        return None
+    if id_filter and not (
+        task_id and any(task_id.startswith(p) for p in id_filter)
+    ):
+        return None
+
+    has_marker = line[len(indent) : len(indent) + 2] == "- "
+    marker = "- " if has_marker else ""
+    return f"{indent}{marker}[{new_status_char}]{space_after_status}{rest}"
+
+
+def _task_ids_by_line(content: str, source_file: str) -> Dict[int, str]:
+    """parses content and maps each task's first line number to its stable id."""
+    root_items = parse_todo_list(content)
+    for item in root_items:
+        item.source_file = source_file
+    _assign_task_ids(root_items)
+
+    ids: Dict[int, str] = {}
+
+    def walk(item: TodoItem):
+        if item.line_num is not None and item.task_id:
+            ids[item.line_num] = item.task_id
+        for child in item.children:
+            walk(child)
+
+    for item in root_items:
+        walk(item)
+    return ids
+
+
+def _edit_status_in_content(
+    content: str,
+    new_status: str,
+    match_pats: List[str],
+    tag_filter: Set[str],
+    status_filter: Set[str],
+    id_filter: Optional[List[str]] = None,
+    id_by_line: Optional[Dict[int, str]] = None,
+):
+    """rewrites matching task lines in-place. returns (new_content, changed_lines)."""
+    new_status_char = REVERSE_STATUS_MAP[new_status]
+    changed_lines: List[str] = []
+    output_lines: List[str] = []
+    id_by_line = id_by_line or {}
+
+    for line_num, line in enumerate(content.splitlines(), 1):
+        match = TODO_ITEM_REGEX.match(line)
+        new_line = (
+            _apply_status_line(
+                line,
+                match,
+                new_status_char,
+                match_pats,
+                tag_filter,
+                status_filter,
+                id_filter,
+                id_by_line.get(line_num),
+            )
+            if match
+            else None
+        )
+        if new_line is not None:
+            changed_lines.append(new_line.strip())
+            output_lines.append(new_line)
+        else:
+            output_lines.append(line)
+
+    new_content = "\n".join(output_lines)
+    if content.endswith("\n"):
+        new_content += "\n"
+    return new_content, changed_lines
+
+
+def _append_task_to_content(content: str, task_line: str) -> str:
+    """inserts the task line after the last task (skipping its continuations)."""
+    lines = content.splitlines()
+    insert_at = None
+    for idx, line in enumerate(lines):
+        if TODO_ITEM_REGEX.match(line):
+            insert_at = idx
+
+    if insert_at is None:
+        new_lines = lines + [task_line]
+    else:
+        base_indent = len(lines[insert_at]) - len(lines[insert_at].lstrip(" "))
+        idx = insert_at + 1
+        # continuation lines are non-blank and indented past the task's indent
+        while idx < len(lines):
+            line = lines[idx]
+            if not line.strip() or (len(line) - len(line.lstrip(" "))) <= base_indent:
+                break
+            idx += 1
+        new_lines = lines[:idx] + [task_line] + lines[idx:]
+
+    return "\n".join(new_lines) + "\n"
+
+
+def _run_add(args: argparse.Namespace, path: Path):
+    """handles --add: appends a new top-level task to the target file."""
+    if args.filter_matches:
+        _print_error("--match cannot be combined with --add")
+        sys.exit(1)
+    if args.filter_statuses:
+        _print_error("--status filter cannot be combined with --add")
+        sys.exit(1)
+    if getattr(args, "filter_ids", None):
+        _print_error("--id cannot be combined with --add")
+        sys.exit(1)
+
+    status = args.set_status or "new"
+    text = args.add
+    for tag in args.filter_tags or []:
+        text = f"{text} #{tag}"
+    task_line = f"[{REVERSE_STATUS_MAP[status]}] {text}"
+
+    content = ""
+    if path.exists():
+        content = _read_file_content(path)
+        if content is None:
+            sys.exit(1)
+
+    try:
+        path.write_text(_append_task_to_content(content, task_line), encoding="utf-8")
+    except Exception as e:
+        _print_error(f"could not write file {path}: {e}")
+        sys.exit(1)
+    print(task_line)
+
+
+def _run_set_status(args: argparse.Namespace, path: Path):
+    """handles --set-status: rewrites matching task lines in the target file."""
+    if (
+        not args.filter_matches
+        and not args.filter_tags
+        and not args.filter_statuses
+        and not getattr(args, "filter_ids", None)
+    ):
+        _print_error("--set-status requires --match, --tag, --status, or --id")
+        sys.exit(1)
+    if not path.exists():
+        _print_error(f"input path not found: {path}")
+        sys.exit(1)
+
+    content = _read_file_content(path)
+    if content is None:
+        sys.exit(1)
+
+    id_filter = [p.lower() for p in args.filter_ids] if args.filter_ids else None
+    id_by_line = None
+    if id_filter:
+        # ids are hashed against the resolved file path, matching how the
+        # file's tasks are listed when passed directly on the command line
+        resolved = _resolve_path(str(path))
+        id_by_line = _task_ids_by_line(content, str(resolved) if resolved else str(path))
+
+    new_content, changed_lines = _edit_status_in_content(
+        content,
+        args.set_status,
+        args.filter_matches or [],
+        set(args.filter_tags) if args.filter_tags else set(),
+        set(args.filter_statuses) if args.filter_statuses else set(),
+        id_filter,
+        id_by_line,
+    )
+    if not changed_lines:
+        _print_error(f"no tasks matched in {path}")
+        sys.exit(1)
+
+    try:
+        path.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        _print_error(f"could not write file {path}: {e}")
+        sys.exit(1)
+    print("\n".join(changed_lines))
+
+
+def _run_mutation(args: argparse.Namespace):
+    """dispatches mutation commands (--add / --set-status) and exits."""
+    path = _resolve_edit_file(args.files)
+    if args.add is not None:
+        _run_add(args, path)
+    else:
+        _run_set_status(args, path)
+    sys.exit(0)
+
+
+#####################
 ## TOML PROCESSING ##
 #####################
 
@@ -867,6 +1203,10 @@ def _collect_all_items(
             # catch errors during processing of a specific path argument
             _print_error(f"processing path {path_arg}: {e}")
             continue  # process other paths
+
+    # ids are always assigned so they can be shown and used as selectors
+    _assign_task_ids(raw_items)
+
     return raw_items
 
 
@@ -880,15 +1220,20 @@ def _process_and_format_items(
     ordered_source_keys: List[str],
 ) -> List[str]:
     """phases 2-4: filter, group, sort, limit, and format items."""
-    filtered_items = filter_items(raw_items, args.filter_tags, args.filter_statuses)
+    filtered_items = filter_items(
+        raw_items,
+        args.filter_tags,
+        args.filter_statuses,
+        args.filter_matches,
+        getattr(args, "filter_ids", None),
+    )
 
     items_by_source = defaultdict(list)
     # create a set for efficient lookup of keys to include
     keys_to_include = set(ordered_source_keys)
     for item in filtered_items:
         # determine the source key for grouping
-        # prefer explicit file path if set (standalone files), then project, then unspecified
-        source_key = item.source_file or item.source_project or UNSPECIFIED_SOURCE
+        source_key = _source_key(item)
         # only group items whose source key is in the final ordered & limited list
         if source_key in keys_to_include:
             items_by_source[source_key].append(item)
@@ -923,9 +1268,31 @@ def _process_and_format_items(
             final_output_lines.append(f"--- {source_key} ---")
             first_header_printed = True
             for item in items_to_print:
-                _format_recursive(item, final_output_lines)
+                _format_recursive(
+                    item, final_output_lines, getattr(args, "show_ids", False)
+                )
 
     return final_output_lines
+
+
+def _expand_statuses(
+    parser: argparse.ArgumentParser, values: Optional[List[str]]
+) -> Optional[List[str]]:
+    """splits comma separated --status values into a validated, deduplicated list."""
+    if not values:
+        return None
+    valid = list(STATUS_MAP.values())
+    expanded: List[str] = []
+    for value in values:
+        for token in value.split(","):
+            token = token.strip()
+            if token not in valid:
+                parser.error(
+                    f"invalid status: {token!r} (choose from {', '.join(valid)})"
+                )
+            if token not in expanded:
+                expanded.append(token)
+    return expanded
 
 
 def main():
@@ -937,8 +1304,9 @@ def main():
         "files",
         metavar="FILE",
         type=Path,
-        nargs="+",
-        help="path(s) to todo list file(s) (.xit or .toml)",
+        nargs="*",
+        default=[Path("ROADMAP.md")],
+        help="path(s) to todo list file(s) (.xit or .toml); defaults to ROADMAP.md",
     )
     parser.add_argument(
         "--tag",
@@ -950,8 +1318,39 @@ def main():
         "--status",
         action="append",
         dest="filter_statuses",
+        metavar="STATUS[,STATUS]",
+        help="filter by status, comma separated for multiple (repeatable)",
+    )
+    parser.add_argument(
+        "--add",
+        metavar="TEXT",
+        default=None,
+        help="add a new top-level task with this text to the file",
+    )
+    parser.add_argument(
+        "--set-status",
+        dest="set_status",
         choices=list(STATUS_MAP.values()),
-        help="filter by status (repeatable)",
+        help="set the status of the added task, or of tasks matching the selectors",
+    )
+    parser.add_argument(
+        "--match",
+        action="append",
+        dest="filter_matches",
+        metavar="TEXT",
+        help="filter by text, case-insensitive substring (repeatable)",
+    )
+    parser.add_argument(
+        "--id",
+        action="append",
+        dest="filter_ids",
+        metavar="ID",
+        help="filter by stable task id or id prefix (repeatable)",
+    )
+    parser.add_argument(
+        "--show-ids",
+        action="store_true",
+        help="prefix each task with a stable content-derived id",
     )
     parser.add_argument(
         "--sort-by-status",
@@ -965,6 +1364,7 @@ def main():
         help="filter by project name (repeatable)",
     )
     parser.add_argument(
+        "-n",
         "--max-tasks",
         type=int,
         default=None,
@@ -989,6 +1389,10 @@ def main():
         help="include projects marked as deprecated in the output",
     )
     args = parser.parse_args()
+    args.filter_statuses = _expand_statuses(parser, args.filter_statuses)
+
+    if args.add is not None or args.set_status is not None:
+        _run_mutation(args)
 
     collected_sources: Dict[str, bool] = {}
     active_projects_from_toml: List[str] = []
