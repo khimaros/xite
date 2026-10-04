@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import sys
+import textwrap
 import tomllib  # requires python 3.11+
 from collections import defaultdict
 from copy import deepcopy
@@ -18,6 +19,7 @@ from typing import Dict, List, Optional, Set, Union
 
 
 INDENT_SPACES = 4
+FORMAT_LINE_WIDTH = 80  # column limit for --format line wrapping
 UNSPECIFIED_SOURCE = "__unspecified__"
 ID_LENGTH = 8  # hex chars of the content-derived task id
 
@@ -166,8 +168,29 @@ def parse_todo_list(text: str) -> List[TodoItem]:
 ################
 
 
-def _format_recursive(item: TodoItem, lines: List[str], show_ids: bool = False):
-    """helper to recursively format an item and its children."""
+def _wrap_rendered_line(line: str, continuation_indent: str, width: int) -> List[str]:
+    """
+    wrap a rendered line to the given width, returning one line per output row.
+
+    lines that already fit are returned untouched so their spacing survives;
+    otherwise words are kept whole and every wrapped row after the first is
+    indented like a continuation line so the output re-parses as one task.
+    """
+    if len(line) <= width or width <= len(continuation_indent):
+        return [line]
+    return textwrap.wrap(
+        line,
+        width=width,
+        subsequent_indent=continuation_indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+def _format_item_block(
+    item: TodoItem, show_ids: bool = False, wrap_width: Optional[int] = None
+) -> List[str]:
+    """render a single task (its own lines only) as output lines."""
     base_indent = " " * (item.level * INDENT_SPACES)
     id_prefix = f"{item.task_id} " if show_ids and item.task_id else ""
     status_char = REVERSE_STATUS_MAP.get(
@@ -189,17 +212,57 @@ def _format_recursive(item: TodoItem, lines: List[str], show_ids: bool = False):
 
     suffix = f" -> {item.target_date}" if item.target_date else ""
 
-    lines.append(
+    task_lines = [
         f"{base_indent}{id_prefix}[{status_char}]{item.space_after_status}{prefix}{first_line_text}{suffix}"
-    )
+    ]
 
     # continuation lines indented relative to the start of the task text
     continuation_indent = base_indent + " " * INDENT_SPACES
     for continuation_line in text_lines[1:]:
-        lines.append(f"{continuation_indent}{continuation_line}")
+        task_lines.append(f"{continuation_indent}{continuation_line}")
 
+    if wrap_width is None:
+        return task_lines
+
+    wrapped: List[str] = []
+    for task_line in task_lines:
+        wrapped.extend(_wrap_rendered_line(task_line, continuation_indent, wrap_width))
+    return wrapped
+
+
+def _format_recursive(
+    item: TodoItem,
+    lines: List[str],
+    show_ids: bool = False,
+    wrap_width: Optional[int] = None,
+):
+    """helper to recursively format an item and its children."""
+    lines.extend(_format_item_block(item, show_ids, wrap_width))
     for child in item.children:
-        _format_recursive(child, lines, show_ids)
+        _format_recursive(child, lines, show_ids, wrap_width)
+
+
+def _format_grouped_by_status(
+    items: List[TodoItem],
+    lines: List[str],
+    show_ids: bool = False,
+    wrap_width: Optional[int] = None,
+):
+    """
+    format top level items grouped into status sections (no headers).
+
+    sections follow STATUS_ORDER (active, new, blocked, undecided, deferred,
+    complete, obsolete) and are separated by a single empty line; children
+    stay attached to their parent and relative order is preserved.
+    """
+    ordered = sorted(items, key=lambda x: STATUS_ORDER.get(x.status, float("inf")))
+    prev_rank = None
+    for item in ordered:
+        rank = STATUS_ORDER.get(item.status, float("inf"))
+        if prev_rank is not None and rank != prev_rank:
+            lines.append("")
+        prev_rank = rank
+        _format_recursive(item, lines, show_ids, wrap_width)
 
 
 ###############
@@ -1267,10 +1330,17 @@ def _process_and_format_items(
                 final_output_lines.append("")
             final_output_lines.append(f"--- {source_key} ---")
             first_header_printed = True
-            for item in items_to_print:
-                _format_recursive(
-                    item, final_output_lines, getattr(args, "show_ids", False)
+            show_ids = getattr(args, "show_ids", False)
+            if getattr(args, "format", False):
+                _format_grouped_by_status(
+                    items_to_print,
+                    final_output_lines,
+                    show_ids,
+                    FORMAT_LINE_WIDTH,
                 )
+            else:
+                for item in items_to_print:
+                    _format_recursive(item, final_output_lines, show_ids)
 
     return final_output_lines
 
@@ -1356,6 +1426,11 @@ def main():
         "--sort-by-status",
         action="store_true",
         help="sort items within each source by status order",
+    )
+    parser.add_argument(
+        "--format",
+        action="store_true",
+        help=f"group tasks by status and wrap lines at {FORMAT_LINE_WIDTH} columns",
     )
     parser.add_argument(
         "--project",

@@ -53,6 +53,22 @@ xite --max-tasks=3 ./examples/bare.xit
 xite --match="child item" ./examples/bare.xit
 ```
 
+## formatted output
+
+`--format` groups the tasks of each source into status sections (active,
+new, blocked, undecided, deferred, complete, obsolete) and wraps long task
+lines at 80 columns. the sections have no headers, just one empty line
+between them, children stay under their parents, and tasks keep their
+relative order inside a section. wrapped lines are indented like
+continuation lines, so formatted output parses back into the same tasks.
+
+```bash
+xite --format ./ROADMAP.md
+
+# it combines with the other options
+xite --format --status=new,active --show-ids ./ROADMAP.md
+```
+
 ## editing
 
 tasks can be added and edited from the command line. a mutation command
@@ -126,6 +142,7 @@ command-line flags are processed in the following order:
 1. `--tag`, `--status`, `--match`, and `--id` filters are applied
    (ids are shown with `--show-ids`)
 1. sorting (`--sort-by-status`) is applied
+1. `--format` groups the printed tasks by status and wraps them at 80 columns
 1. output limits (`--max-tasks`) are applied (per project/source)
 
 ## acknowledgments

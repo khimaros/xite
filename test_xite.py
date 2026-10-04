@@ -3122,5 +3122,185 @@ class TestXiteStatusLists(unittest.TestCase):
         self.assertIn("error", err)
 
 
+class TestXiteFormat(unittest.TestCase):
+    """tests for --format: status grouping and 80 column line wrapping."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def write_file(self, name, content):
+        path = os.path.join(self.test_dir, name)
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def run_xite(self, args_list):
+        """run xite and drop the per-source "--- path ---" header lines."""
+        return "\n".join(
+            line
+            for line in run_main_and_capture(args_list).strip().splitlines()
+            if not re.match(r"^--- .* ---$", line)
+        )
+
+    def test_groups_by_status_without_headers(self):
+        path = self.write_file(
+            "todos.xit",
+            "[x] done thing\n"
+            "[ ] a new thing\n"
+            "[@] working\n"
+            "[!] stuck\n"
+            "[~] retired\n"
+            "[?] unsure\n"
+            "[>] later\n",
+        )
+        output = self.run_xite(["--format", path])
+        self.assertEqual(
+            output.strip().splitlines(),
+            [
+                "[@] working",
+                "",
+                "[ ] a new thing",
+                "",
+                "[!] stuck",
+                "",
+                "[?] unsure",
+                "",
+                "[>] later",
+                "",
+                "[x] done thing",
+                "",
+                "[~] retired",
+            ],
+        )
+
+    def test_relative_order_within_a_status_is_preserved(self):
+        path = self.write_file(
+            "todos.xit",
+            "[x] zulu\n[ ] mike\n[x] alpha\n[ ] bravo\n",
+        )
+        output = self.run_xite(["--format", path])
+        self.assertEqual(
+            output.strip().splitlines(),
+            ["[ ] mike", "[ ] bravo", "", "[x] zulu", "[x] alpha"],
+        )
+
+    def test_children_stay_under_their_parent(self):
+        path = self.write_file(
+            "todos.xit",
+            "[x] done parent\n    [ ] open child\n[@] active parent\n",
+        )
+        output = self.run_xite(["--format", path])
+        self.assertEqual(
+            output.strip().splitlines(),
+            ["[@] active parent", "", "[x] done parent", "    [ ] open child"],
+        )
+
+    def test_no_section_headers(self):
+        path = self.write_file("todos.xit", "[ ] one\n[x] two\n")
+        output = self.run_xite(["--format", path])
+        for line in output.splitlines():
+            self.assertNotRegex(line, r"^(active|new|blocked|complete)[: ]*$")
+            self.assertNotRegex(line, r"^#+ ")
+
+    def test_wraps_long_tasks_at_80_columns(self):
+        long_text = " ".join(
+            [f"word{n}" for n in range(30)]
+        )  # ~205 chars of lowercase words
+        path = self.write_file("todos.xit", f"[ ] {long_text}\n")
+        output = self.run_xite(["--format", path])
+        lines = output.strip().splitlines()
+        self.assertGreater(len(lines), 1)
+        for line in lines:
+            self.assertLessEqual(len(line), 80)
+        self.assertTrue(lines[0].startswith("[ ] "))
+        for line in lines[1:]:
+            self.assertTrue(line.startswith("    "), f"bad indent: {line!r}")
+            self.assertNotEqual(line.lstrip(" "), "", "blank continuation line")
+        self.assertEqual(
+            " ".join([lines[0][4:]] + [line.strip() for line in lines[1:]]),
+            long_text,
+        )
+
+    def test_wrap_indent_follows_task_level(self):
+        long_text = " ".join(f"word{n}" for n in range(30))
+        path = self.write_file("todos.xit", f"[ ] parent\n    [ ] {long_text}\n")
+        output = self.run_xite(["--format", path])
+        lines = output.strip().splitlines()
+        self.assertEqual(lines[0], "[ ] parent")
+        self.assertTrue(lines[1].startswith("    [ ] "), f"bad task: {lines[1]!r}")
+        for line in lines[2:]:
+            self.assertTrue(line.startswith("        "), f"bad indent: {line!r}")
+            self.assertFalse(line.startswith(" " * 12), f"over indented: {line!r}")
+
+    def test_existing_continuations_are_wrapped_too(self):
+        long_text = " ".join(f"word{n}" for n in range(30))
+        path = self.write_file("todos.xit", f"[ ] parent\n    continuation {long_text}\n")
+        output = self.run_xite(["--format", path])
+        for line in output.strip().splitlines():
+            self.assertLessEqual(len(line), 80)
+
+    def test_long_words_are_not_broken(self):
+        path = self.write_file(
+            "todos.xit",
+            "[ ] " + "a" * 40 + " " + "b" * 40 + " " + "c" * 40 + "\n",
+        )
+        output = self.run_xite(["--format", path])
+        self.assertEqual(
+            " ".join(line.strip() for line in output.strip().splitlines()),
+            f"[ ] {'a' * 40} {'b' * 40} {'c' * 40}",
+        )
+
+    def test_format_with_show_ids(self):
+        long_text = " ".join(f"word{n}" for n in range(30))
+        path = self.write_file("todos.xit", f"[ ] {long_text}\n[x] done\n")
+        output = self.run_xite(["--format", "--show-ids", path])
+        lines = output.strip().splitlines()
+        self.assertGreater(len(lines), 1)
+        self.assertRegex(lines[0], r"^[0-9a-f]{8} \[ \] ")
+        for line in lines:
+            self.assertLessEqual(len(line), 80)
+
+    def test_format_with_filters(self):
+        path = self.write_file(
+            "todos.xit", "[x] done thing\n[@] working\n[ ] fresh\n"
+        )
+        output = self.run_xite(["--format", "--status=new,active", path])
+        self.assertEqual(output.strip().splitlines(), ["[@] working", "", "[ ] fresh"])
+
+    def test_format_groups_within_each_source(self):
+        a = self.write_file("a.xit", "[x] a done\n[ ] a new\n")
+        b = self.write_file("b.xit", "[x] b done\n[@] b active\n")
+        output = run_main_and_capture(["--format", a, b])
+        self.assertEqual(
+            output.strip().splitlines(),
+            [
+                f"--- {a} ---",
+                "[ ] a new",
+                "",
+                "[x] a done",
+                "",
+                f"--- {b} ---",
+                "[@] b active",
+                "",
+                "[x] b done",
+            ],
+        )
+
+    def test_without_format_no_grouping_or_wrapping(self):
+        long_text = " ".join(f"word{n}" for n in range(30))
+        path = self.write_file(
+            "todos.xit", f"[x] done\n[ ] new\n[ ] {long_text}\n"
+        )
+        lines = self.run_xite([path]).strip().splitlines()
+        self.assertEqual(lines[0], "[x] done")
+        self.assertGreater(len(lines[-1]), 80)
+
+
 if __name__ == "__main__":
     unittest.main()

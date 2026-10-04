@@ -16,6 +16,13 @@ product requirements for xite. never regress these without explicit approval.
   `--status=new,active`), and empty or unknown entries are rejected with
   a non-zero exit before any file is read or written.
 - lossless round tripping: reading and re-writing preserves formatting.
+- `--format` prints tasks grouped by status (active, new, blocked,
+  undecided, deferred, complete, obsolete) with no section headers and one
+  empty line between sections, and wraps output lines to 80 columns using
+  continuation-line indentation so wrapped output re-parses as the same task.
+- grouping and wrapping are one flag: `--format` always does both, applies per
+  source, keeps children attached to their parents, and preserves relative
+  order within a status.
 - print a stable, content-derived id with each task (`--show-ids`);
   ids are deterministic across runs, preserved through filtering, and
   distinct for duplicate task texts within a source.

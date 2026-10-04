@@ -1,7 +1,7 @@
 # ROADMAP
 
 ```
-[ ] xite --format to group the roadmap items by status
+[ ] more terse and intuitive query/edit ux
 [ ] reimplement the entire project in rust
 
 [>] backward compatibility with [x]it specification
@@ -13,6 +13,9 @@
     [x] parse basic `.xit` file format
     [x] support for #tags
 
+[x] xite --format to linewrap (80 cols) and group the roadmap items by status:
+    active, new, blocked, undecided, deferred, complete, obsolete;
+    each section should have one empty line between them
 [x] allow selecting multiple (OR) statuses with --status=new,active
 [x] enable matching (and editing) by task id
 [x] add a flag to output a stable id with each task
